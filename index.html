@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en" style="height: 100%;">
+  <head>
+    <meta charset="utf-8" />
+    <title>Singular 32-bit (Local)</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    
+    <script src="https://cxrtnc.leaningtech.com/1.2.2/cx.js"></script>
+    <script type="module">
+      
+      // --- 1. Helper: Fetch parts and create a Blob URL ---
+      async function createDiskBlobUrl(baseName) {
+        const parts = [];
+        let index = 1;
+        while (true) {
+          const url = `${baseName}.part${index}`;
+          try {
+            const response = await fetch(url);
+            if (!response.ok) break; 
+            parts.push(await response.blob());
+            index++;
+          } catch (e) { break; }
+        }
+
+        if (parts.length === 0) throw new Error("No image parts found");
+        const mergedBlob = new Blob(parts, { type: 'application/octet-stream' });
+        return URL.createObjectURL(mergedBlob);
+      }
+
+      // --- 2. Helper: Hack XHR to inject missing headers for Blob URLs ---
+      function enableBlobHeaders(targetUrl) {
+        const originalOpen = XMLHttpRequest.prototype.open;
+        const originalGetResponseHeader = XMLHttpRequest.prototype.getResponseHeader;
+
+        // Capture the URL when a request is opened
+        XMLHttpRequest.prototype.open = function(method, url) {
+          this._targetUrl = url; 
+          return originalOpen.apply(this, arguments);
+        };
+
+        // Fake the headers if the URL matches our Blob
+        XMLHttpRequest.prototype.getResponseHeader = function(header) {
+          if (this._targetUrl === targetUrl) {
+            const h = header.toLowerCase();
+            if (h === 'last-modified') return "Fri, 01 Jan 2021 00:00:00 GMT";
+            if (h === 'etag') return "10000";
+          }
+          return originalGetResponseHeader.apply(this, arguments);
+        };
+      }
+
+      async function start() {
+        const term = new Terminal({ convertEol: true });
+        term.open(document.getElementById("terminal"));
+        
+        try {
+          term.write("Loading disk image parts...\r\n");
+
+          // A. Generate the Blob URL
+          const diskUrl = await createDiskBlobUrl("singular_32bit.ext2");
+          
+          // B. Activate the XHR hack for this specific URL
+          enableBlobHeaders(diskUrl);
+          
+          term.write("Booting CheerpX...\r\n");
+
+          // C. Pass the URL to CheerpX (Header check will now pass)
+          const readDevice = await CheerpX.HttpBytesDevice.create(diskUrl);
+          
+          const writeDevice = await CheerpX.IDBDevice.create("singular_rw_storage");
+          const overlayDevice = await CheerpX.OverlayDevice.create(readDevice, writeDevice);
+          const webDevice = await CheerpX.WebDevice.create("");
+          const dataDevice = await CheerpX.DataDevice.create();
+
+          const cx = await CheerpX.Linux.create({
+            mounts: [
+              { type: "ext2", path: "/", dev: overlayDevice },
+              { type: "dir", path: "/app", dev: webDevice },
+              { type: "dir", path: "/data", dev: dataDevice },
+              { type: "devs", path: "/dev" },
+            ],
+          });
+
+          const send = cx.setCustomConsole(
+            (buf) => term.write(new Uint8Array(buf)),
+            term.cols,
+            term.rows
+          );
+
+          term.onData((str) => {
+            for (let i = 0; i < str.length; i++) send(str.charCodeAt(i));
+          });
+
+          await cx.run("/usr/bin/Singular", [], {
+            env: [
+              "HOME=/root",
+              "USER=root",
+              "SHELL=/usr/bin/bash",
+              "TERM=xterm", 
+              "LANG=C.UTF-8",
+            ],
+            cwd: "/root",
+            uid: 0,
+            gid: 0,
+          });
+
+        } catch (e) {
+          term.write(`\r\nError: ${e.message}`);
+          console.error(e);
+        }
+      }
+
+      start();
+    </script>
+  </head>
+  <body style="height: 100%; background: black; margin: 0; overflow: hidden;">
+    <div id="terminal" style="height: 100%;"></div>
+    <script src="coi-serviceworker.js"></script>
+  </body>
+</html>
